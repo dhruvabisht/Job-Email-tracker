@@ -29,6 +29,25 @@ CSV_FILE = 'job_emails.csv'
 # Irish timezone
 IRISH_TZ = pytz.timezone('Europe/Dublin')
 
+# Add these lists for filtering
+INCLUDE_SENDERS = [
+    'myworkday.com', 'successfactors.eu', 'recruiting.honeywell.com', 'deptagency.com',
+    'talentupdates@recruiting.honeywell.com', 'productsdc12pm.successfactors.eu',
+    'notification_from_people_services@mastercard.com', 'fragomen@myworkday.com',
+    'jasna.tanevska@deptagency.com', 'correspondencethegreatwep3@productsdc12pm.successfactors.eu'
+]
+EXCLUDED_SENDERS = [
+    'linkedin.com', 'indeed.com', 'job alerts', 'noreply@linkedin.com', 'noreply@indeed.com',
+    'jobs-listings@linkedin.com', 'messaging-digest-noreply@linkedin.com'
+]
+INCLUDE_KEYWORDS = [
+    'application submitted', 'application received', 'interview', 'assessment', 'offer',
+    'rejected', 'not selected', 'next steps', 'unfortunately', 'thank you for applying',
+    'status update', 'decision', 'scheduled', 'invitation', 'progress', 'update',
+    'hiring process', 'move forward with other candidates', 'invited', 'video assessment',
+    'online assessment', 'one-way interview', 'congratulations', 'selected', 'shortlisted'
+]
+
 # =========== AUTH ==============
 def get_gmail_service():
     if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
@@ -52,31 +71,6 @@ def get_gmail_service():
         
     service = build('gmail', 'v1', credentials=creds)
     return service
-
-    # List of substrings to exclude (case-insensitive match)
-    EXCLUDED_SENDERS = [
-        'linkedin.com',
-        'indeed.com',
-        'tcsion.com',
-        'github.com',
-        'vodafone',
-        'aib.ie',
-        'jobs2web.com',
-        'match.indeed.com',
-        'noreply@linkedin.com',
-        'messaging-digest-noreply@linkedin.com'
-    ]
-
-    emails_data = []
-    for msg in messages:
-        data = extract_email_data(service, msg['id'])
-        if data:
-            sender_lower = data['sender'].lower()
-            if any(excluded in sender_lower for excluded in EXCLUDED_SENDERS):
-                continue  # Skip excluded senders
-            data['summary'] = summarize_text(data['body'])
-            emails_data.append(data)
-
 
 # =========== EMAIL PROCESSING ==============
 def decode_mime_words(s):
@@ -137,84 +131,94 @@ def extract_email_data(service, msg_id):
 # Simple in-memory cache to avoid duplicate summaries during one run
 summary_cache = {}
 
-def summarize_text(text):
+# Helper to check if email is relevant
+def is_relevant_email(email_data):
+    sender = email_data['sender'].lower()
+    subject = email_data['subject'].lower()
+    body = email_data['body'].lower()
+    if any(excluded in sender for excluded in EXCLUDED_SENDERS):
+        return False
+    if any(included in sender for included in INCLUDE_SENDERS):
+        return True
+    if any(keyword in subject or keyword in body for keyword in INCLUDE_KEYWORDS):
+        return True
+    return False
+
+# Helper to check if email is a next-stage/interview email
+NEXT_STAGE_KEYWORDS = [
+    'progress', 'next stage', 'interview', 'assessment', 'invited', 'invitation', 'one-way interview', 'video assessment', 'shortlisted', 'move forward'
+]
+def is_next_stage_email(email_data):
+    subject = email_data['subject'].lower()
+    body = email_data['body'].lower()
+    return any(keyword in subject or keyword in body for keyword in NEXT_STAGE_KEYWORDS)
+
+# Improved summarization prompt
+def summarize_text(text, subject=None, sender=None):
     if not OPENAI_API_KEY:
         return "(Summary disabled - OPENAI_API_KEY not set)"
-
-    # Fallback: Skip summarization if body is too short
     if not text or len(text.strip()) < 30:
         return "(Too short to summarize)"
-
-    # Use SHA-256 hash of email body for caching
     email_hash = sha256(text.strip().encode('utf-8')).hexdigest()
     if email_hash in summary_cache:
         return summary_cache[email_hash]
-
     try:
         import openai
         openai.api_key = OPENAI_API_KEY
-
+        prompt = (
+            "You are an assistant that summarizes job application emails. "
+            "Given the email content, sender, and subject, generate a concise summary in this format: "
+            "- For application submission: 'Application submitted to {company} ({role})'\n"
+            "- For rejection: 'Rejected from {company} for {role}'\n"
+            "- For next stage/interview: 'Selected for next stage at {company} for {role} (complete by {date})'\n"
+            "If a deadline is mentioned, include it. If you can't find company or role, use placeholders."
+        )
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Sender: {sender}\nSubject: {subject}\nEmail: {text[:2000]}"}
+        ]
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that summarizes job-related emails for a job seeker in 1–2 clear, concise sentences."
-                },
-                {
-                    "role": "user",
-                    "content": f"Summarize this email for job application purposes:\n\n{text[:2000]}"
-                }
-            ],
+            messages=messages,
             max_tokens=100,
             temperature=0.3
         )
-
         summary = response.choices[0].message["content"].strip()
-        summary_cache[email_hash] = summary  # Cache result
+        summary_cache[email_hash] = summary
         return summary
-
     except Exception as e:
         print("OpenAI API error:", e)
         return "(Summary failed)"
 
-
 # =========== MAIN LOGIC =============
 def main():
     service = get_gmail_service()
-
-    # Query: filter emails related to job/applications/interview/work
-    query = '(subject:job OR subject:application OR subject:interview OR subject:work OR from:(linkedin.com OR indeed.com OR "noreply@"))'
-
+    query = ''  # Fetch all, filter in Python
     try:
         results = service.users().messages().list(userId='me', q=query, maxResults=50).execute()
         messages = results.get('messages', [])
     except HttpError as error:
         print(f'An error occurred: {error}')
         return
-
     emails_data = []
     for msg in messages:
         data = extract_email_data(service, msg['id'])
-        if data:
-            data['summary'] = summarize_text(data['body'])
+        if data and is_relevant_email(data):
+            data['highlight'] = is_next_stage_email(data)
+            data['summary'] = summarize_text(data['body'], data['subject'], data['sender'])
             emails_data.append(data)
-
-    # Sort by date descending
     emails_data.sort(key=lambda x: x['date'], reverse=True)
-
-    # Write to CSV
     with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        writer.writerow(['Sender Email', 'Date', 'Subject', 'Summary'])
+        writer.writerow(['Sender Email', 'Date', 'Subject', 'Summary', 'Highlight'])
         for email in emails_data:
             writer.writerow([
                 email['sender'],
                 email['date'].strftime('%Y-%m-%d %H:%M:%S'),
                 email['subject'],
-                email['summary']
+                email['summary'],
+                'yes' if email.get('highlight') else ''
             ])
-
     print(f'✅ {len(emails_data)} emails processed and saved to {CSV_FILE}')
 
 if __name__ == '__main__':
