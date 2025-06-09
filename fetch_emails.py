@@ -9,6 +9,7 @@ from email import message_from_bytes
 from email.header import decode_header
 import openai
 import pytz
+from hashlib import sha256
 
 # =========== CONFIG =============
 # Load these from environment variables (set in GitHub Secrets and Streamlit Cloud)
@@ -127,9 +128,22 @@ def extract_email_data(service, msg_id):
     }
 
 # =========== OPENAI SUMMARY =============
+# Simple in-memory cache to avoid duplicate summaries during one run
+summary_cache = {}
+
 def summarize_text(text):
     if not OPENAI_API_KEY:
         return "(Summary disabled - OPENAI_API_KEY not set)"
+
+    # Fallback: Skip summarization if body is too short
+    if not text or len(text.strip()) < 30:
+        return "(Too short to summarize)"
+
+    # Use SHA-256 hash of email body for caching
+    email_hash = sha256(text.strip().encode('utf-8')).hexdigest()
+    if email_hash in summary_cache:
+        return summary_cache[email_hash]
+
     try:
         import openai
         openai.api_key = OPENAI_API_KEY
@@ -151,7 +165,9 @@ def summarize_text(text):
         )
 
         summary = response.choices[0].message["content"].strip()
+        summary_cache[email_hash] = summary  # Cache result
         return summary
+
     except Exception as e:
         print("OpenAI API error:", e)
         return "(Summary failed)"
