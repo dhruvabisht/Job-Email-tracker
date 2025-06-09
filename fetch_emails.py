@@ -133,21 +133,29 @@ def summarize_text(text):
     try:
         import openai
         openai.api_key = OPENAI_API_KEY
-        prompt = f"Summarize this email for job application purposes in 1-2 sentences:\n\n{text[:2000]}"
-        response = openai.Completion.create(
-            engine="text-davinci-003",
-            prompt=prompt,
+
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that summarizes job-related emails for a job seeker in 1–2 clear, concise sentences."
+                },
+                {
+                    "role": "user",
+                    "content": f"Summarize this email for job application purposes:\n\n{text[:2000]}"
+                }
+            ],
             max_tokens=100,
-            temperature=0.3,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0
+            temperature=0.3
         )
-        summary = response.choices[0].text.strip()
+
+        summary = response.choices[0].message["content"].strip()
         return summary
     except Exception as e:
         print("OpenAI API error:", e)
         return "(Summary failed)"
+
 
 # =========== MAIN LOGIC =============
 def main():
