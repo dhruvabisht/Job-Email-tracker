@@ -46,6 +46,31 @@ def get_gmail_service():
     service = build('gmail', 'v1', credentials=creds)
     return service
 
+    # List of substrings to exclude (case-insensitive match)
+    EXCLUDED_SENDERS = [
+        'linkedin.com',
+        'indeed.com',
+        'tcsion.com',
+        'github.com',
+        'vodafone',
+        'aib.ie',
+        'jobs2web.com',
+        'match.indeed.com',
+        'noreply@linkedin.com',
+        'messaging-digest-noreply@linkedin.com'
+    ]
+
+    emails_data = []
+    for msg in messages:
+        data = extract_email_data(service, msg['id'])
+        if data:
+            sender_lower = data['sender'].lower()
+            if any(excluded in sender_lower for excluded in EXCLUDED_SENDERS):
+                continue  # Skip excluded senders
+            data['summary'] = summarize_text(data['body'])
+            emails_data.append(data)
+
+
 # =========== EMAIL PROCESSING ==============
 def decode_mime_words(s):
     decoded_fragments = decode_header(s)
