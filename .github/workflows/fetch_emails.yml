@@ -9,6 +9,8 @@ on:
 jobs:
   fetch-emails:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Add this to ensure the workflow has write permissions
 
     steps:
     - name: Checkout repo
@@ -32,10 +34,14 @@ jobs:
         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       run: python fetch_emails.py
 
-    - name: Commit and push CSV changes
+    - name: Configure Git
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global --add safe.directory /github/workspace
+
+    - name: Commit and push CSV changes
+      run: |
         git add job_emails.csv
         git commit -m "Update job_emails.csv (auto fetch)" || echo "No changes to commit"
-        git push
+        git push origin main
