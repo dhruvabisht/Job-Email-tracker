@@ -1,62 +1,166 @@
 import os
 import base64
-import re
 import csv
 from datetime import datetime
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-from utils import parse_email_content, classify_email
+from googleapiclient.errors import HttpError
+from email import message_from_bytes
+from email.header import decode_header
+import openai
+import pytz
 
+# =========== CONFIG =============
+# Load these from environment variables (set in GitHub Secrets and Streamlit Cloud)
+CLIENT_ID = os.environ.get('GMAIL_CLIENT_ID')
+CLIENT_SECRET = os.environ.get('GMAIL_CLIENT_SECRET')
+REFRESH_TOKEN = os.environ.get('GMAIL_REFRESH_TOKEN')
+
+# OpenAI API Key for summarization
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+
+# Gmail API scope
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
-KEYWORDS = ['interview', 'application', 'shortlisted', 'selected', 'position', 'role', 'offer', 'rejected']
 
-def authenticate_gmail():
-    flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
-    creds = flow.run_local_server(port=0)
-    return build('gmail', 'v1', credentials=creds)
+# CSV file path
+CSV_FILE = 'job_emails.csv'
 
-def fetch_job_emails(service):
-    query = 'subject:interview OR subject:application OR subject:offer OR subject:job OR from:(@linkedin.com OR @indeed.com OR @workday.com OR @greenhouse.io)'
-    results = service.users().messages().list(userId='me', q=query, maxResults=50).execute()
-    messages = results.get('messages', [])
-    return messages
+# Irish timezone
+IRISH_TZ = pytz.timezone('Europe/Dublin')
 
-def main():
-    service = authenticate_gmail()
-    messages = fetch_job_emails(service)
+# =========== AUTH ==============
+def get_gmail_service():
+    creds = Credentials(
+        None,
+        refresh_token=REFRESH_TOKEN,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        token_uri='https://oauth2.googleapis.com/token',
+        scopes=SCOPES
+    )
+    try:
+        creds.refresh(request=None)  # refresh access token
+    except Exception as e:
+        print("Failed to refresh token:", e)
+        raise
+    service = build('gmail', 'v1', credentials=creds)
+    return service
 
-    job_emails = []
-    for msg in messages:
-        msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
-        headers = msg_data['payload']['headers']
-        subject = next((h['value'] for h in headers if h['name'] == 'Subject'), '')
-        sender = next((h['value'] for h in headers if h['name'] == 'From'), '')
-        date_raw = next((h['value'] for h in headers if h['name'] == 'Date'), '')
+# =========== EMAIL PROCESSING ==============
+def decode_mime_words(s):
+    decoded_fragments = decode_header(s)
+    return ''.join(
+        str(t[0], t[1] or 'utf-8') if isinstance(t[0], bytes) else t[0]
+        for t in decoded_fragments
+    )
+
+def extract_email_data(service, msg_id):
+    try:
+        msg = service.users().messages().get(userId='me', id=msg_id, format='raw').execute()
+        raw_msg = base64.urlsafe_b64decode(msg['raw'].encode('ASCII'))
+        email_msg = message_from_bytes(raw_msg)
+    except Exception as e:
+        print(f"Failed to get message {msg_id}: {e}")
+        return None
+
+    # Extract From
+    sender = email_msg.get('From', '')
+
+    # Extract Date
+    date_str = email_msg.get('Date', '')
+    try:
+        date_obj = datetime.strptime(date_str[:-6], '%a, %d %b %Y %H:%M:%S')  # Remove timezone part
+        date_obj = IRISH_TZ.localize(date_obj)
+    except Exception:
+        date_obj = datetime.now(IRISH_TZ)
+
+    # Extract Subject
+    subject_raw = email_msg.get('Subject', '')
+    subject = decode_mime_words(subject_raw)
+
+    # Extract snippet or first 500 chars for summarization
+    body = ''
+    if email_msg.is_multipart():
+        for part in email_msg.walk():
+            if part.get_content_type() == 'text/plain':
+                try:
+                    body = part.get_payload(decode=True).decode(part.get_content_charset() or 'utf-8')
+                    break
+                except Exception:
+                    continue
+    else:
         try:
-            date = datetime.strptime(date_raw[:-6], "%a, %d %b %Y %H:%M:%S")
-        except:
-            date = datetime.utcnow()
+            body = email_msg.get_payload(decode=True).decode(email_msg.get_content_charset() or 'utf-8')
+        except Exception:
+            body = ''
 
-        snippet = msg_data.get('snippet', '')
-        body = parse_email_content(msg_data)
-        classification = classify_email(subject + " " + body)
+    return {
+        'sender': sender,
+        'date': date_obj,
+        'subject': subject,
+        'body': body
+    }
 
-        job_emails.append({
-            'From': sender,
-            'Date': date.strftime("%Y-%m-%d %H:%M:%S"),
-            'Subject': subject,
-            'Summary': snippet,
-            'Classification': classification
-        })
+# =========== OPENAI SUMMARY =============
+def summarize_text(text):
+    if not OPENAI_API_KEY:
+        return "(Summary disabled - OPENAI_API_KEY not set)"
+    try:
+        import openai
+        openai.api_key = OPENAI_API_KEY
+        prompt = f"Summarize this email for job application purposes in 1-2 sentences:\n\n{text[:2000]}"
+        response = openai.Completion.create(
+            engine="text-davinci-003",
+            prompt=prompt,
+            max_tokens=100,
+            temperature=0.3,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
+        )
+        summary = response.choices[0].text.strip()
+        return summary
+    except Exception as e:
+        print("OpenAI API error:", e)
+        return "(Summary failed)"
 
-    job_emails.sort(key=lambda x: x['Date'], reverse=True)
+# =========== MAIN LOGIC =============
+def main():
+    service = get_gmail_service()
 
-    with open('job_emails.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=job_emails[0].keys())
-        writer.writeheader()
-        writer.writerows(job_emails)
+    # Query: filter emails related to job/applications/interview/work
+    query = '(subject:job OR subject:application OR subject:interview OR subject:work OR from:(linkedin.com OR indeed.com OR "noreply@"))'
 
-    print("Saved job-related emails to job_emails.csv")
+    try:
+        results = service.users().messages().list(userId='me', q=query, maxResults=50).execute()
+        messages = results.get('messages', [])
+    except HttpError as error:
+        print(f'An error occurred: {error}')
+        return
+
+    emails_data = []
+    for msg in messages:
+        data = extract_email_data(service, msg['id'])
+        if data:
+            data['summary'] = summarize_text(data['body'])
+            emails_data.append(data)
+
+    # Sort by date descending
+    emails_data.sort(key=lambda x: x['date'], reverse=True)
+
+    # Write to CSV
+    with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Sender Email', 'Date', 'Subject', 'Summary'])
+        for email in emails_data:
+            writer.writerow([
+                email['sender'],
+                email['date'].strftime('%Y-%m-%d %H:%M:%S'),
+                email['subject'],
+                email['summary']
+            ])
+
+    print(f'✅ {len(emails_data)} emails processed and saved to {CSV_FILE}')
 
 if __name__ == '__main__':
     main()
