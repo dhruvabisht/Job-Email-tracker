@@ -31,19 +31,25 @@ IRISH_TZ = pytz.timezone('Europe/Dublin')
 
 # =========== AUTH ==============
 def get_gmail_service():
+    if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN]):
+        raise ValueError("Missing required Gmail credentials. Please check your environment variables.")
+
     creds = Credentials(
-        None,
+        token=None,
         refresh_token=REFRESH_TOKEN,
+        token_uri='https://oauth2.googleapis.com/token',
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
-        token_uri='https://oauth2.googleapis.com/token',
         scopes=SCOPES
     )
+    
     try:
-        creds.refresh(request=None)  # refresh access token
+        from google.auth.transport.requests import Request
+        creds.refresh(Request())
     except Exception as e:
         print("Failed to refresh token:", e)
         raise
+        
     service = build('gmail', 'v1', credentials=creds)
     return service
 
