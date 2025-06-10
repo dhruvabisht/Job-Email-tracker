@@ -29,7 +29,7 @@ CSV_FILE = 'job_emails.csv'
 # Irish timezone
 IRISH_TZ = pytz.timezone('Europe/Dublin')
 
-# Add these lists for filtering
+# Update these lists as needed:
 INCLUDE_SENDERS = [
     'myworkday.com', 'successfactors.eu', 'recruiting.honeywell.com', 'deptagency.com',
     'talentupdates@recruiting.honeywell.com', 'productsdc12pm.successfactors.eu',
@@ -38,7 +38,8 @@ INCLUDE_SENDERS = [
 ]
 EXCLUDED_SENDERS = [
     'linkedin.com', 'indeed.com', 'job alerts', 'noreply@linkedin.com', 'noreply@indeed.com',
-    'jobs-listings@linkedin.com', 'messaging-digest-noreply@linkedin.com'
+    'jobs-listings@linkedin.com', 'messaging-digest-noreply@linkedin.com',
+    'khanacademy.org', 'jobscan.co', 'aib.ie', 'hec.edu', 'geu.ac.in', 'talentoutreach', 'perfume shop', 'glanbia.com'
 ]
 INCLUDE_KEYWORDS = [
     'application submitted', 'application received', 'interview', 'assessment', 'offer',
@@ -46,6 +47,9 @@ INCLUDE_KEYWORDS = [
     'status update', 'decision', 'scheduled', 'invitation', 'progress', 'update',
     'hiring process', 'move forward with other candidates', 'invited', 'video assessment',
     'online assessment', 'one-way interview', 'congratulations', 'selected', 'shortlisted'
+]
+EXCLUDED_KEYWORDS = [
+ 'newsletter', 'report', 'deals', 'open for', 'meet your', 'explained', 'thank you for visiting', 'new jobs posted', 'digest', 'father\'s day', 'mba', 'alumn', 'academy', 'match report', 'explained', 'open for', 'meet your', 'explained', 'thank you for visiting', 'new jobs posted', 'digest', 'father\'s day', 'mba', 'alumn', 'academy', 'match report'
 ]
 
 # =========== AUTH ==============
@@ -138,6 +142,8 @@ def is_relevant_email(email_data):
     body = email_data['body'].lower()
     if any(excluded in sender for excluded in EXCLUDED_SENDERS):
         return False
+    if any(keyword in subject or keyword in body for keyword in EXCLUDED_KEYWORDS):
+        return False
     if any(included in sender for included in INCLUDE_SENDERS):
         return True
     if any(keyword in subject or keyword in body for keyword in INCLUDE_KEYWORDS):
@@ -153,7 +159,9 @@ def is_next_stage_email(email_data):
     body = email_data['body'].lower()
     return any(keyword in subject or keyword in body for keyword in NEXT_STAGE_KEYWORDS)
 
-# Improved summarization prompt
+# --- OpenAI API update ---
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
 def summarize_text(text, subject=None, sender=None):
     if not OPENAI_API_KEY:
         return "(Summary disabled - OPENAI_API_KEY not set)"
@@ -163,8 +171,6 @@ def summarize_text(text, subject=None, sender=None):
     if email_hash in summary_cache:
         return summary_cache[email_hash]
     try:
-        import openai
-        openai.api_key = OPENAI_API_KEY
         prompt = (
             "You are an assistant that summarizes job application emails. "
             "Given the email content, sender, and subject, generate a concise summary in this format: "
@@ -177,18 +183,18 @@ def summarize_text(text, subject=None, sender=None):
             {"role": "system", "content": prompt},
             {"role": "user", "content": f"Sender: {sender}\nSubject: {subject}\nEmail: {text[:2000]}"}
         ]
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=messages,
             max_tokens=100,
             temperature=0.3
         )
-        summary = response.choices[0].message["content"].strip()
+        summary = response.choices[0].message.content.strip()
         summary_cache[email_hash] = summary
         return summary
     except Exception as e:
         print("OpenAI API error:", e)
-        return "(Summary failed)"
+        return f"(Summary failed: {e})"
 
 # =========== MAIN LOGIC =============
 def main():
